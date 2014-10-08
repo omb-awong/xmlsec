@@ -1,5 +1,5 @@
-#ifndef XMLSECRB_H
-#define XMLSECRB_H
+#ifndef NOKOGIRI_EXT_XMLSEC_XMLSECRB_H
+#define NOKOGIRI_EXT_XMLSEC_XMLSECRB_H
 
 #include <ruby.h>
 
@@ -16,10 +16,12 @@
 #include <xmlsec/xmlenc.h>
 #include <xmlsec/templates.h>
 #include <xmlsec/crypto.h>
-#include <xmlsec/dl.h>
 
-VALUE sign_with_key(VALUE self, VALUE rb_key_name, VALUE rb_rsa_key);
-VALUE sign_with_certificate(VALUE self, VALUE rb_key_name, VALUE rb_rsa_key, VALUE rb_cert);
+// TODO(awong): Support non-gcc and non-clang compilers.
+#define EXTENSION_EXPORT __attribute__((visibility("default")))
+
+VALUE sign_with_key(int argc, VALUE* argv, VALUE self);
+VALUE sign_with_certificate(int argc, VALUE* argv, VALUE self);
 VALUE verify_signature_with_rsa_key(VALUE self, VALUE rb_rsa_key);
 VALUE verify_signature_with_named_keys(VALUE self, VALUE rb_keys);
 VALUE verify_signature_with_certificates(VALUE self, VALUE rb_certs);
@@ -36,4 +38,4 @@ extern VALUE rb_eKeystoreError;
 extern VALUE rb_eEncryptionError;
 extern VALUE rb_eDecryptionError;
 
-#endif // XMLSECRB_H
+#endif // NOKOGIRI_EXT_XMLSEC_XMLSECRB_H

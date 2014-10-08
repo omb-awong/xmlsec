@@ -1,28 +1,69 @@
 #include "xmlsecrb.h"
+#include "util.h"
 
-VALUE sign_with_certificate(VALUE self, VALUE rb_key_name, VALUE rb_rsa_key, VALUE rb_cert) {
-  xmlDocPtr doc;
+// Appends an xmlsig <dsig:Signature> node to document stored in |self|
+// with a signature based on the given key and cert.
+//
+// Expects 3-4 positional arguments:
+//   key_name - String with name of the rsa key. May be the empty string.
+//   rsa_key - A PEM encoded rsa key for signing.
+//   cert - The public cert to include with the signature.
+//   ref_uri - [optional] The URI attribute for the <Reference> node in the
+//             signature.
+VALUE sign_with_certificate(int argc, VALUE* argv, VALUE self) {
+  VALUE rb_exception_result = Qnil;
+  const char* exception_message = NULL;
+
+  xmlDocPtr doc = NULL;
   xmlNodePtr signNode = NULL;
   xmlNodePtr refNode = NULL;
   xmlNodePtr keyInfoNode = NULL;
   xmlSecDSigCtxPtr dsigCtx = NULL;
-  char *keyName;
-  char *certificate;
-  char *rsaKey;
-  unsigned int rsaKeyLength, certificateLength;
+  char *keyName = NULL;
+  char *certificate = NULL;
+  char *rsaKey = NULL;
+  char *refUri = NULL;
+  unsigned int rsaKeyLength = 0;
+  unsigned int certificateLength = 0;
+
+  resetXmlSecError();
+
+  if (argc < 3 || argc > 4) {
+    rb_exception_result = rb_eArgError;
+    exception_message = "Expecting 3-4 arguments";
+    goto done;
+  }
 
   Data_Get_Struct(self, xmlDoc, doc);
+
+  VALUE rb_key_name = argv[0];
+  VALUE rb_rsa_key = argv[1];
+  VALUE rb_cert = argv[2];
+
+  Check_Type(rb_key_name, T_STRING);
+  Check_Type(rb_rsa_key, T_STRING);
+  Check_Type(rb_cert, T_STRING);
+
   rsaKey = RSTRING_PTR(rb_rsa_key);
   rsaKeyLength = RSTRING_LEN(rb_rsa_key);
-  keyName = RSTRING_PTR(rb_key_name);
+  keyName = StringValueCStr(rb_key_name);
   certificate = RSTRING_PTR(rb_cert);
   certificateLength = RSTRING_LEN(rb_cert);
 
+  if (argc > 3) {
+    VALUE rb_ref_uri = argv[3];
+    if (TYPE(rb_ref_uri) != T_NIL) {
+      Check_Type(rb_ref_uri, T_STRING);
+      refUri = StringValueCStr(rb_ref_uri);
+    }
+  }
+
   // create signature template for RSA-SHA1 enveloped signature
   signNode = xmlSecTmplSignatureCreate(doc, xmlSecTransformExclC14NId,
-                                         xmlSecTransformRsaSha1Id, NULL);
+                                       xmlSecTransformRsaSha1Id, NULL);
   if (signNode == NULL) {
-    rb_raise(rb_eSigningError, "failed to create signature template");
+    rb_exception_result = rb_eSigningError;
+    exception_message = "failed to create signature template";
     goto done;
   }
 
@@ -31,34 +72,45 @@ VALUE sign_with_certificate(VALUE self, VALUE rb_key_name, VALUE rb_rsa_key, VAL
 
   // add reference
   refNode = xmlSecTmplSignatureAddReference(signNode, xmlSecTransformSha1Id,
-                                        NULL, NULL, NULL);
+                                            NULL, (const xmlChar *)refUri, NULL);
   if(refNode == NULL) {
-    rb_raise(rb_eSigningError, "failed to add reference to signature template");
+    rb_exception_result = rb_eSigningError;
+    exception_message = "failed to add reference to signature template";
     goto done;
   }
 
   // add enveloped transform
   if(xmlSecTmplReferenceAddTransform(refNode, xmlSecTransformEnvelopedId) == NULL) {
-    rb_raise(rb_eSigningError, "failed to add enveloped transform to reference");
+    rb_exception_result = rb_eSigningError;
+    exception_message = "failed to add enveloped transform to reference";
+    goto done;
+  }
+
+  if(xmlSecTmplReferenceAddTransform(refNode, xmlSecTransformExclC14NId) == NULL) {
+    rb_exception_result = rb_eSigningError;
+    exception_message = "failed to add canonicalization transform to reference";
     goto done;
   }
 
   // add <dsig:KeyInfo/> and <dsig:X509Data/>
   keyInfoNode = xmlSecTmplSignatureEnsureKeyInfo(signNode, NULL);
   if(keyInfoNode == NULL) {
-    rb_raise(rb_eSigningError, "failed to add key info");
+    rb_exception_result = rb_eSigningError;
+    exception_message = "failed to add key info";
     goto done;
   }
   
   if(xmlSecTmplKeyInfoAddX509Data(keyInfoNode) == NULL) {
-    rb_raise(rb_eSigningError, "failed to add X509Data node");
+    rb_exception_result = rb_eSigningError;
+    exception_message = "failed to add X509Data node";
     goto done;
   }
 
   // create signature context, we don't need keys manager in this example
-  dsigCtx = xmlSecDSigCtxCreate(NULL);
+  dsigCtx = createDSigContext(NULL);
   if(dsigCtx == NULL) {
-    rb_raise(rb_eSigningError, "failed to create signature context");
+    rb_exception_result = rb_eSigningError;
+    exception_message = "failed to create signature context";
     goto done;
   }
 
@@ -70,7 +122,8 @@ VALUE sign_with_certificate(VALUE self, VALUE rb_key_name, VALUE rb_rsa_key, VAL
                                                   NULL,
                                                   NULL);
   if(dsigCtx->signKey == NULL) {
-    rb_raise(rb_eSigningError, "failed to load private key");
+    rb_exception_result = rb_eSigningError;
+    exception_message = "failed to load private key";
     goto done;
   }
   
@@ -79,19 +132,22 @@ VALUE sign_with_certificate(VALUE self, VALUE rb_key_name, VALUE rb_rsa_key, VAL
                                       (xmlSecByte *)certificate,
                                       certificateLength,
                                       xmlSecKeyDataFormatPem) < 0) {
-    rb_raise(rb_eSigningError, "failed to load certificate");
+    rb_exception_result = rb_eSigningError;
+    exception_message = "failed to load certificate";
     goto done;
   }
 
   // set key name
   if(xmlSecKeySetName(dsigCtx->signKey, (xmlSecByte *)keyName) < 0) {
-    rb_raise(rb_eSigningError, "failed to set key name");
+    rb_exception_result = rb_eSigningError;
+    exception_message = "failed to set key name";
     goto done;
   }
 
   // sign the template
   if(xmlSecDSigCtxSign(dsigCtx, signNode) < 0) {
-    rb_raise(rb_eSigningError, "signature failed");
+    rb_exception_result = rb_eSigningError;
+    exception_message = "signature failed";
     goto done;
   }
 
@@ -100,5 +156,14 @@ done:
     xmlSecDSigCtxDestroy(dsigCtx);
   }
 
-  return T_NIL;
+  if(rb_exception_result != Qnil) {
+    if (hasXmlSecLastError()) {
+      rb_raise(rb_exception_result, "%s, XmlSec error: %s", exception_message,
+               getXmlSecLastError());
+    } else {
+      rb_raise(rb_exception_result, "%s", exception_message);
+    }
+  }
+
+  return Qnil;
 }

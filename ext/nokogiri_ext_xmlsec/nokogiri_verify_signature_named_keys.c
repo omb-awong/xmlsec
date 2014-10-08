@@ -1,4 +1,5 @@
 #include "xmlsecrb.h"
+#include "util.h"
 
 static int addRubyKeyToManager(VALUE rb_key, VALUE rb_value, VALUE rb_manager) {
   xmlSecKeysMngrPtr keyManager = (xmlSecKeysMngrPtr)rb_manager;
@@ -39,11 +40,19 @@ static int addRubyKeyToManager(VALUE rb_key, VALUE rb_value, VALUE rb_manager) {
   return ST_CONTINUE;
 }
 
-static xmlSecKeysMngrPtr getKeyManager(VALUE rb_hash) {
+// Constructs a xmlSecKeysMngr and adds all the named to key mappings
+// specified by the |rb_hash| to the key manager.
+//
+// Caller takes ownership. Free with xmlSecKeysMngrDestroy().
+static xmlSecKeysMngrPtr createKeyManagerFromNamedKeys(
+    VALUE rb_hash,
+    VALUE* rb_exception_result_out,
+    const char** exception_message_out) {
   xmlSecKeysMngrPtr keyManager = xmlSecKeysMngrCreate();
   if (keyManager == NULL) return NULL;
   if (xmlSecCryptoAppDefaultKeysMngrInit(keyManager) < 0) {
-    rb_raise(rb_eKeystoreError, "could not initialize key manager");
+    *rb_exception_result_out = rb_eKeystoreError;
+    *exception_message_out = "could not initialize key manager";
     xmlSecKeysMngrDestroy(keyManager);
     return NULL;
   }
@@ -54,11 +63,16 @@ static xmlSecKeysMngrPtr getKeyManager(VALUE rb_hash) {
 }
 
 VALUE verify_signature_with_named_keys(VALUE self, VALUE rb_hash) {
-  xmlDocPtr doc;
+  VALUE rb_exception_result = Qnil;
+  const char* exception_message = NULL;
+
+  xmlDocPtr doc = NULL;
   xmlNodePtr node = NULL;
   xmlSecDSigCtxPtr dsigCtx = NULL;
   xmlSecKeysMngrPtr keyManager = NULL;
   VALUE result = Qfalse;
+
+  resetXmlSecError();
 
   Check_Type(rb_hash, T_HASH);
   Data_Get_Struct(self, xmlDoc, doc);
@@ -66,26 +80,30 @@ VALUE verify_signature_with_named_keys(VALUE self, VALUE rb_hash) {
   // find start node
   node = xmlSecFindNode(xmlDocGetRootElement(doc), xmlSecNodeSignature, xmlSecDSigNs);
   if(node == NULL) {
-    rb_raise(rb_eVerificationError, "start node not found");
+    rb_exception_result = rb_eVerificationError;
+    exception_message = "start node not found";
     goto done;
   }
 
-  keyManager = getKeyManager(rb_hash);
+  keyManager = createKeyManagerFromNamedKeys(rb_hash, &rb_exception_result,
+                                             &exception_message);
   if (keyManager == NULL) {
-    rb_raise(rb_eKeystoreError, "failed to create key manager");
+    // Propagate exception.
     goto done;
   }
 
   // create signature context, we don't need keys manager in this example
-  dsigCtx = xmlSecDSigCtxCreate(keyManager);
+  dsigCtx = createDSigContext(keyManager);
   if(dsigCtx == NULL) {
-    rb_raise(rb_eVerificationError, "failed to create signature context");
+    rb_exception_result = rb_eVerificationError;
+    exception_message = "failed to create signature context";
     goto done;
   }
 
   // verify signature
   if(xmlSecDSigCtxVerify(dsigCtx, node) < 0) {
-    rb_raise(rb_eVerificationError, "signature could not be verified");
+    rb_exception_result = rb_eVerificationError;
+    exception_message = "signature could not be verified";
     goto done;
   }
       
@@ -100,6 +118,15 @@ done:
 
   if (keyManager != NULL) {
     xmlSecKeysMngrDestroy(keyManager);
+  }
+
+  if(rb_exception_result != Qnil) {
+    if (hasXmlSecLastError()) {
+      rb_raise(rb_exception_result, "%s, XmlSec error: %s", exception_message,
+               getXmlSecLastError());
+    } else {
+      rb_raise(rb_exception_result, "%s", exception_message);
+    }
   }
 
   return result;
